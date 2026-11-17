@@ -1,0 +1,83 @@
+name: CD - Build e Deploy no Azure
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+jobs:
+  ci:
+    uses: ./.github/workflows/ci.yml
+    secrets: inherit
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Checkout do código
+        uses: actions/checkout@v4
+
+      - name: Extrair versão da tag
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+
+      - name: Configurar Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login no GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build e Push da imagem Docker
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/davigibson/mlops-2026-lab3:${{ env.VERSION }}
+            ghcr.io/davigibson/mlops-2026-lab3:latest
+
+      - name: Login no Azure via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Atualizar Container App no Azure
+        run: |
+          az containerapp update \
+            --name intent-clf \
+            --resource-group mlops-2026-2 \
+            --image "ghcr.io/davigibson/mlops-2026-lab3:${{ env.VERSION }}" \
+            --set-env-vars "APP_VERSION=${{ env.VERSION }}"
+
+      - name: Validar endpoint em produção
+        run: |
+          FQDN=$(az containerapp show \
+            --name intent-clf \
+            --resource-group mlops-2026-2 \
+            --query "properties.configuration.ingress.fqdn" \
+            -o tsv)
+          URL="https://${FQDN}"
+          echo "Validando ${URL}..."
+          for i in $(seq 1 30); do
+            RESP=$(curl -sS "${URL}/" || true)
+            echo "Tentativa $i: $RESP"
+            if echo "$RESP" | grep -q "\"version\":\"${{ env.VERSION }}\"" || echo "$RESP" | grep -q "\"version\": \"${{ env.VERSION }}\""; then
+              echo "Deploy validado com sucesso!"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Erro: a aplicação não respondeu com a versão ${{ env.VERSION }} no tempo esperado."
+          exit 1
