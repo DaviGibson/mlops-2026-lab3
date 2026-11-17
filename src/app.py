@@ -1,3 +1,4 @@
+import os
 from fastapi import FastAPI
 from contextlib import asynccontextmanager
 
@@ -12,7 +13,7 @@ init_opentelemetry()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Start up 
+    # Start up
     load_models()
     yield
     # Close down
@@ -25,7 +26,7 @@ app = FastAPI(
     version='0.1.0',
     docs_url='/docs',
     lifespan=lifespan
-) 
+)
 
 app.include_router(intent_clf_router)
 
@@ -35,4 +36,4 @@ FastAPIInstrumentor.instrument_app(app)
 
 @app.get('/')
 def root():
-    return {'status': 'ok'}
+    return {'status': 'ok', 'version': os.getenv('APP_VERSION', 'dev')}
