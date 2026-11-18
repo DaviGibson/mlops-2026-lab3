@@ -96,7 +96,7 @@ jobs:
 
   verify:
     needs: deploy
-    if: needs.deploy.result == 'success'
+    if: always() && needs.deploy.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Definir versão alvo
