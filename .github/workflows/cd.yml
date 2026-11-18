@@ -4,6 +4,12 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag da versão para deploy/rollback (ex: v1.0.1)"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -12,13 +18,14 @@ permissions:
 
 jobs:
   ci:
+    if: github.event_name == 'push'
     uses: ./.github/workflows/ci.yml
     secrets: inherit
 
-  deploy:
+  release:
     needs: ci
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
-    environment: production
     steps:
       - name: Checkout do código
         uses: actions/checkout@v4
@@ -46,6 +53,22 @@ jobs:
             ghcr.io/davigibson/mlops-2026-lab3:${{ env.VERSION }}
             ghcr.io/davigibson/mlops-2026-lab3:latest
 
+  deploy:
+    needs: [ci, release]
+    if: always() && (github.event_name == 'workflow_dispatch' || (needs.ci.result == 'success' && needs.release.result == 'success'))
+    runs-on: ubuntu-latest
+    environment: production
+    outputs:
+      url: ${{ steps.get_url.outputs.url }}
+    steps:
+      - name: Definir versão alvo
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ inputs.version }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
       - name: Login no Azure via OIDC
         uses: azure/login@v2
         with:
@@ -61,23 +84,41 @@ jobs:
             --image "ghcr.io/davigibson/mlops-2026-lab3:${{ env.VERSION }}" \
             --set-env-vars "APP_VERSION=${{ env.VERSION }}"
 
-      - name: Validar endpoint em produção
+      - name: Obter URL do Container App
+        id: get_url
         run: |
           FQDN=$(az containerapp show \
             --name intent-clf \
             --resource-group mlops-2026-2 \
             --query "properties.configuration.ingress.fqdn" \
             -o tsv)
-          URL="https://${FQDN}"
-          echo "Validando ${URL}..."
+          echo "url=https://${FQDN}" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: deploy
+    if: needs.deploy.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Definir versão alvo
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "VERSION=${{ inputs.version }}" >> "$GITHUB_ENV"
+          else
+            echo "VERSION=${GITHUB_REF#refs/tags/}" >> "$GITHUB_ENV"
+          fi
+
+      - name: Verificar versão no ar
+        run: |
+          URL="${{ needs.deploy.outputs.url }}"
+          echo "Verificando ${URL} para versão ${VERSION}..."
           for i in $(seq 1 30); do
             RESP=$(curl -sS "${URL}/" || true)
             echo "Tentativa $i: $RESP"
-            if echo "$RESP" | grep -q "\"version\":\"${{ env.VERSION }}\"" || echo "$RESP" | grep -q "\"version\": \"${{ env.VERSION }}\""; then
-              echo "Deploy validado com sucesso!"
+            if echo "$RESP" | grep -q "\"version\":\"${VERSION}\"" || echo "$RESP" | grep -q "\"version\": \"${VERSION}\""; then
+              echo "OK: ${VERSION} no ar"
               exit 0
             fi
             sleep 10
           done
-          echo "Erro: a aplicação não respondeu com a versão ${{ env.VERSION }} no tempo esperado."
+          echo "Erro: versão ${VERSION} não respondeu no tempo esperado."
           exit 1
